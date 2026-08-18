@@ -3,6 +3,7 @@ const BASE = 'https://api.rocketlane.com/api/1.0';
 const DRY_RUN = process.env.DRY_RUN !== 'false';
 
 const MIN_WEEKLY_MINUTES = 40 * 60;
+const MAX_WEEKLY_MINUTES = 65 * 60;
 const VACATION_PHASE = 'vacation_and_holidays';
 const ONBOARDING_PHASE = 'onboarding';
 const SETUP_PHASE = 'setup_recurring_use_case';
@@ -108,6 +109,9 @@ function monthsBetween(fromMs, toMs) {
     const totalMinutes = counted.reduce((sum, e) => sum + e.minutes, 0);
     if (totalMinutes < MIN_WEEKLY_MINUTES) {
       reasons.push(`Only ${(totalMinutes / 60).toFixed(1)}h submitted/approved this week, below the 40h minimum`);
+    }
+    if (totalMinutes > MAX_WEEKLY_MINUTES) {
+      reasons.push(`${(totalMinutes / 60).toFixed(1)}h submitted/approved this week, over the 65h flag threshold`);
     }
 
     const nonTimeTracking = pending.filter(

@@ -1,11 +1,6 @@
 const API_KEY = process.env.ROCKETLANE_API_KEY;
 const BASE = 'https://api.rocketlane.com/api/1.0';
 
-if (!API_KEY) {
-  console.error('Missing ROCKETLANE_API_KEY');
-  process.exit(1);
-}
-
 async function get(path) {
   const res = await fetch(`${BASE}${path}`, {
     headers: { 'api-key': API_KEY, Accept: 'application/json' },
@@ -21,32 +16,24 @@ function show(title, data, max = 6000) {
 }
 
 (async () => {
-  const fields = await get('/fields');
-  const byType = {};
-  for (const f of fields.data || []) (byType[f.objectType] ||= []).push(f);
-  show('Object types seen in /fields', Object.keys(byType));
-  show('USER fields', byType['USER'] || []);
-
-  const timeEntries = (await get('/time-entries')).data || [];
-  show('Time entries (first 5, raw)', timeEntries.slice(0, 5));
-
-  const projects = (await get('/projects')).data || [];
+  const users = (await get('/users?status.eq=ACTIVE')).data || [];
   show(
-    'Projects (summarized, first 8)',
-    projects.slice(0, 8).map((p) => ({
-      projectId: p.projectId,
-      projectName: p.projectName,
-      archived: p.archived,
-      projectTypeField: (p.fields || []).find((f) => f.fieldLabel === 'Project Type'),
+    `Active users with role (${users.length} total, first 10)`,
+    users.slice(0, 10).map((u) => ({
+      userId: u.userId,
+      email: u.email,
+      name: `${u.firstName} ${u.lastName || ''}`.trim(),
+      role: u.role,
+      createdAt: u.createdAt,
     }))
   );
 
-  try {
-    const users = (await get('/users')).data || [];
-    show('Users (first 5, raw)', users.slice(0, 5));
-  } catch (err) {
-    show('Users endpoint error', { message: err.message });
-  }
+  const submitted = (
+    await get(
+      '/time-entries?approvalStatus.eq=SUBMITTED&includeFields=status,submittedBy,submittedAt,approvedBy,approvedAt'
+    )
+  ).data || [];
+  show(`Submitted (pending) time entries (${submitted.length} found)`, submitted.slice(0, 5));
 })().catch((err) => {
   console.error('Discovery run failed:', err.message);
   process.exit(1);

@@ -15,15 +15,19 @@ async function get(path) {
   return JSON.parse(text);
 }
 
-function show(title, data) {
+function show(title, data, max = 6000) {
   console.log(`\n=== ${title} ===`);
-  console.log(JSON.stringify(data, null, 2).slice(0, 4000));
+  console.log(JSON.stringify(data, null, 2).slice(0, max));
 }
 
 (async () => {
-  show('Fields', await get('/fields'));
-  show('Time entries (sample)', await get('/time-entries?limit=10'));
-  show('Projects (sample)', await get('/projects?limit=5'));
+  const fields = await get('/fields');
+  const objectTypes = [...new Set((fields.data || []).map((f) => f.objectType))];
+  show('Object types seen in /fields', objectTypes);
+  show('Time entry fields', (fields.data || []).filter((f) => f.objectType === 'TIME_ENTRY'));
+
+  show('Time entries (sample)', await get('/time-entries'));
+  show('Projects (sample)', await get('/projects'));
 })().catch((err) => {
   console.error('Discovery run failed:', err.message);
   process.exit(1);

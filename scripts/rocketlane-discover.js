@@ -7,6 +7,9 @@ const VACATION_PHASE = 'vacation_and_holidays';
 const ONBOARDING_PHASE = 'onboarding';
 const SETUP_PHASE = 'setup_recurring_use_case';
 const MAINTENANCE_PHASE = 'maintenance_recurring_use_case';
+const ADMIN_PHASE = 'admin';
+const REVIEW_PHASES = ['poc', 'portal_migration', 'pilot'];
+const ADMIN_FLAG_MINUTES = 20 * 60;
 const ONBOARDING_TENURE_MONTHS = 3;
 const ROLE_MOSTLY_THRESHOLD = 0.5; // TK: confirm what "mostly" should mean
 
@@ -79,12 +82,13 @@ function monthsBetween(fromMs, toMs) {
   const users = await getAllPages('/users?status.eq=ACTIVE');
   const userById = new Map(users.map((u) => [u.userId, u]));
 
-  const entries = await getAllPages(
-    `/time-entries?approvalStatus.eq=SUBMITTED&date.ge=${weekStart}&date.le=${weekEnd}&includeFields=status,submittedBy,submittedAt`
+  const weekEntries = await getAllPages(
+    `/time-entries?date.ge=${weekStart}&date.le=${weekEnd}&includeFields=status,submittedBy,submittedAt,approvedBy,approvedAt`
   );
 
   const byUser = new Map();
-  for (const e of entries) {
+  for (const e of weekEntries) {
+    if (e.status === 'REJECTED') continue;
     const uid = e.user.userId;
     if (!byUser.has(uid)) byUser.set(uid, []);
     byUser.get(uid).push(e);
@@ -92,63 +96,78 @@ function monthsBetween(fromMs, toMs) {
 
   const results = [];
 
-  for (const [userId, userEntries] of byUser) {
+  for (const [userId, weekEntriesForUser] of byUser) {
+    const pending = weekEntriesForUser.filter((e) => e.status === 'SUBMITTED');
+    if (pending.length === 0) continue; // nothing awaiting approval for this person
+
+    const counted = weekEntriesForUser.filter((e) => e.status === 'SUBMITTED' || e.status === 'APPROVED');
     const user = userById.get(userId);
+    const roleName = (user?.role?.roleName || '').toLowerCase();
     const reasons = [];
 
-    const totalMinutes = userEntries.reduce((sum, e) => sum + e.minutes, 0);
+    const totalMinutes = counted.reduce((sum, e) => sum + e.minutes, 0);
     if (totalMinutes < MIN_WEEKLY_MINUTES) {
-      reasons.push(`Only ${(totalMinutes / 60).toFixed(1)}h logged, below the 40h minimum`);
+      reasons.push(`Only ${(totalMinutes / 60).toFixed(1)}h submitted/approved this week, below the 40h minimum`);
     }
 
-    const nonTimeTracking = userEntries.filter(
+    const nonTimeTracking = pending.filter(
       (e) => !(e.project && e.project.projectName.toLowerCase().includes('time tracking'))
     );
     if (nonTimeTracking.length) {
-      reasons.push(`${nonTimeTracking.length} entries not on a "Time Tracking" project (e.g. "${nonTimeTracking[0].project?.projectName}")`);
+      reasons.push(`${nonTimeTracking.length} pending entries not on a "Time Tracking" project (e.g. "${nonTimeTracking[0].project?.projectName}")`);
     }
 
-    const missingPhase = userEntries.filter((e) => !e.projectPhase);
+    const missingPhase = pending.filter((e) => !e.projectPhase);
     if (missingPhase.length) {
-      reasons.push(`${missingPhase.length} entries with no work/phase selected`);
+      reasons.push(`${missingPhase.length} pending entries with no work/phase selected`);
     }
 
     if (user) {
       const tenureMonths = monthsBetween(user.createdAt, Date.now());
       if (tenureMonths > ONBOARDING_TENURE_MONTHS) {
-        const onOnboarding = userEntries.filter((e) => e.projectPhase && e.projectPhase.phaseName === ONBOARDING_PHASE);
+        const onOnboarding = pending.filter((e) => e.projectPhase && e.projectPhase.phaseName === ONBOARDING_PHASE);
         if (onOnboarding.length) {
-          reasons.push(`${onOnboarding.length} entries on "onboarding" despite ${tenureMonths}mo tenure (>3mo limit)`);
+          reasons.push(`${onOnboarding.length} pending entries on "onboarding" despite ${tenureMonths}mo tenure (>3mo limit)`);
         }
       }
     } else {
       reasons.push('User not found in active roster');
     }
 
-    const vacationEntries = userEntries.filter((e) => e.projectPhase && e.projectPhase.phaseName === VACATION_PHASE);
+    const vacationEntries = pending.filter((e) => e.projectPhase && e.projectPhase.phaseName === VACATION_PHASE);
     const badVacation = vacationEntries.filter((e) => e.minutes !== 480 && e.minutes !== 240);
     if (badVacation.length) {
-      reasons.push(`${badVacation.length} vacation entries not exactly 8h or 4h (e.g. ${(badVacation[0].minutes / 60).toFixed(1)}h)`);
+      reasons.push(`${badVacation.length} pending vacation entries not exactly 8h or 4h (e.g. ${(badVacation[0].minutes / 60).toFixed(1)}h)`);
     }
 
-    if (user && user.role && user.role.roleName) {
-      const roleName = user.role.roleName.toLowerCase();
-      const setupMinutes = userEntries.filter((e) => e.projectPhase?.phaseName === SETUP_PHASE).reduce((s, e) => s + e.minutes, 0);
-      const maintenanceMinutes = userEntries.filter((e) => e.projectPhase?.phaseName === MAINTENANCE_PHASE).reduce((s, e) => s + e.minutes, 0);
+    if (roleName) {
+      const setupMinutes = counted.filter((e) => e.projectPhase?.phaseName === SETUP_PHASE).reduce((s, e) => s + e.minutes, 0);
+      const maintenanceMinutes = counted.filter((e) => e.projectPhase?.phaseName === MAINTENANCE_PHASE).reduce((s, e) => s + e.minutes, 0);
       const relevantTotal = setupMinutes + maintenanceMinutes;
       if (relevantTotal > 0) {
         if (roleName.includes('deployment') && !roleName.includes('ongoing delivery')) {
           const setupShare = setupMinutes / relevantTotal;
           if (setupShare < ROLE_MOSTLY_THRESHOLD) {
-            reasons.push(`Deployment role but only ${(setupShare * 100).toFixed(0)}% of setup/maintenance hours are setup`);
+            reasons.push(`Deployment role but only ${(setupShare * 100).toFixed(0)}% of this week's setup/maintenance hours are setup`);
           }
         } else if (roleName.includes('ongoing delivery')) {
           const maintenanceShare = maintenanceMinutes / relevantTotal;
           if (maintenanceShare < ROLE_MOSTLY_THRESHOLD) {
-            reasons.push(`Ongoing Delivery role but only ${(maintenanceShare * 100).toFixed(0)}% of setup/maintenance hours are maintenance`);
+            reasons.push(`Ongoing Delivery role but only ${(maintenanceShare * 100).toFixed(0)}% of this week's setup/maintenance hours are maintenance`);
           }
         }
       }
+    }
+
+    const adminMinutes = pending.filter((e) => e.projectPhase?.phaseName === ADMIN_PHASE).reduce((s, e) => s + e.minutes, 0);
+    if (adminMinutes > ADMIN_FLAG_MINUTES && !roleName.includes('manager') && !roleName.includes('lead')) {
+      reasons.push(`${(adminMinutes / 60).toFixed(1)}h logged to admin, over the 20h flag threshold for a non-manager/lead role`);
+    }
+
+    const reviewPhaseEntries = pending.filter((e) => e.projectPhase && REVIEW_PHASES.includes(e.projectPhase.phaseName));
+    if (reviewPhaseEntries.length) {
+      const phasesUsed = [...new Set(reviewPhaseEntries.map((e) => e.projectPhase.phaseName))].join(', ');
+      reasons.push(`${reviewPhaseEntries.length} entries on a flagged phase (${phasesUsed}) — needs manual review`);
     }
 
     const decision = reasons.length === 0 ? 'APPROVE' : 'NEEDS_REVIEW';
@@ -156,7 +175,8 @@ function monthsBetween(fromMs, toMs) {
       userId,
       email: user?.email,
       name: user ? `${user.firstName} ${user.lastName || ''}`.trim() : null,
-      totalHours: (totalMinutes / 60).toFixed(1),
+      pendingHours: (pending.reduce((s, e) => s + e.minutes, 0) / 60).toFixed(1),
+      weekTotalHours: (totalMinutes / 60).toFixed(1),
       decision,
       reasons,
     });

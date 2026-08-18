@@ -1,6 +1,8 @@
 const API_KEY = process.env.ROCKETLANE_API_KEY;
-const BASE = 'https://api.rocketlane.com/api/1.0';
+const BASE_URL = 'https://api.rocketlane.com/api/1.0';
 const DRY_RUN = process.env.DRY_RUN !== 'false';
+const LOOKBACK_WEEKS = parseInt(process.env.LOOKBACK_WEEKS || '4', 10);
+const ESCALATE_AFTER = 2;
 
 const MIN_WEEKLY_MINUTES = 40 * 60;
 const MAX_WEEKLY_MINUTES = 65 * 60;
@@ -12,33 +14,26 @@ const ADMIN_PHASE = 'admin';
 const REVIEW_PHASES = ['poc', 'portal_migration', 'pilot'];
 const ADMIN_FLAG_MINUTES = 20 * 60;
 const ONBOARDING_TENURE_MONTHS = 3;
-const ROLE_MOSTLY_THRESHOLD = 0.5; // TK: confirm what "mostly" should mean
-
-if (!API_KEY) {
-  console.error('Missing ROCKETLANE_API_KEY');
-  process.exit(1);
-}
+const ROLE_MOSTLY_THRESHOLD = 0.5; // TK: confirm exact threshold
 
 async function get(path) {
-  const res = await fetch(`${BASE}${path}`, { headers: { 'api-key': API_KEY, Accept: 'application/json' } });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`GET ${path} -> ${res.status}: ${text.slice(0, 500)}`);
-  return JSON.parse(text);
+  const res = await fetch(`${BASE_URL}${path}`, { headers: { 'api-key': API_KEY } });
+  if (!res.ok) throw new Error(`${path} -> ${res.status}: ${await res.text()}`);
+  return res.json();
 }
 
 async function patch(path, body) {
   if (DRY_RUN) {
-    console.log(`[DRY RUN] would PATCH ${path} with`, JSON.stringify(body));
-    return { dryRun: true };
+    console.log(`[DRY RUN] would PATCH ${path}`, JSON.stringify(body));
+    return null;
   }
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${BASE_URL}${path}`, {
     method: 'PATCH',
-    headers: { 'api-key': API_KEY, Accept: 'application/json', 'Content-Type': 'application/json' },
+    headers: { 'api-key': API_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(`PATCH ${path} -> ${res.status}: ${text.slice(0, 500)}`);
-  return JSON.parse(text);
+  if (!res.ok) throw new Error(`${path} -> ${res.status}: ${await res.text()}`);
+  return res.json();
 }
 
 async function getAllPages(path) {
@@ -46,10 +41,10 @@ async function getAllPages(path) {
   let pageToken;
   do {
     const sep = path.includes('?') ? '&' : '?';
-    const url = pageToken ? `${path}${sep}pageToken=${pageToken}` : path;
-    const res = await get(url);
-    results = results.concat(res.data || []);
-    pageToken = res.pagination && res.pagination.hasMore ? res.pagination.nextPageToken : null;
+    const pageParam = pageToken ? `${sep}pageToken=${pageToken}` : '';
+    const page = await get(`${path}${pageParam}`);
+    results = results.concat(page.data || []);
+    pageToken = page.pagination?.hasMore ? page.pagination.nextPageToken : undefined;
   } while (pageToken);
   return results;
 }
@@ -57,7 +52,7 @@ async function getAllPages(path) {
 function mondayOf(dateStr) {
   const d = new Date(dateStr + 'T00:00:00Z');
   const day = d.getUTCDay();
-  const diff = (day === 0 ? -6 : 1) - day;
+  const diff = day === 0 ? -6 : 1 - day;
   d.setUTCDate(d.getUTCDate() + diff);
   return d.toISOString().slice(0, 10);
 }
@@ -69,136 +64,179 @@ function addDays(dateStr, n) {
 }
 
 function monthsBetween(fromMs, toMs) {
-  const from = new Date(fromMs);
-  const to = new Date(toMs);
-  return (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
+  return (toMs - fromMs) / (1000 * 60 * 60 * 24 * 30.44);
 }
 
-(async () => {
+// Runs the shared approve/reject criteria against one person's one week.
+// pending = SUBMITTED entries (drive per-entry checks)
+// counted = SUBMITTED + APPROVED entries (drive the hour-total checks)
+function evaluateWeek(pending, counted, user) {
+  const reasons = [];
+  const totalMinutes = counted.reduce((sum, e) => sum + (e.minutes || 0), 0);
+
+  if (totalMinutes < MIN_WEEKLY_MINUTES) {
+    reasons.push(`Total ${(totalMinutes / 60).toFixed(1)}h is under the 40h floor`);
+  }
+  if (totalMinutes > MAX_WEEKLY_MINUTES) {
+    reasons.push(`Total ${(totalMinutes / 60).toFixed(1)}h exceeds the 65h ceiling`);
+  }
+
+  for (const e of pending) {
+    if (!e.project?.projectName?.startsWith('Time Tracking')) {
+      reasons.push(`Entry on non-"Time Tracking" project: ${e.project?.projectName}`);
+    }
+    if (!e.projectPhase?.phaseName) {
+      reasons.push('Entry missing a work phase');
+    }
+  }
+
+  const tenureMonths = user.createdAt ? monthsBetween(new Date(user.createdAt).getTime(), Date.now()) : null;
+  if (tenureMonths !== null && tenureMonths > ONBOARDING_TENURE_MONTHS) {
+    const onboardingEntries = pending.filter(e => e.projectPhase?.phaseName === ONBOARDING_PHASE);
+    if (onboardingEntries.length > 0) {
+      reasons.push(`Tracking to onboarding phase but tenure is ${tenureMonths.toFixed(1)} months`);
+    }
+  }
+
+  const vacationEntries = pending.filter(e => e.projectPhase?.phaseName === VACATION_PHASE);
+  for (const e of vacationEntries) {
+    if (e.minutes !== 480 && e.minutes !== 240) {
+      reasons.push(`Vacation entry is ${(e.minutes / 60).toFixed(1)}h, not 8h or 4h`);
+    }
+  }
+
+  const roleName = (user.role?.roleName || '').toLowerCase();
+  const isDeployment = roleName.includes('deployment');
+  const isOngoingDelivery = roleName.includes('ongoing delivery');
+  if (isDeployment || isOngoingDelivery) {
+    const setupMinutes = pending.filter(e => e.projectPhase?.phaseName === SETUP_PHASE).reduce((s, e) => s + e.minutes, 0);
+    const maintMinutes = pending.filter(e => e.projectPhase?.phaseName === MAINTENANCE_PHASE).reduce((s, e) => s + e.minutes, 0);
+    const relevant = setupMinutes + maintMinutes;
+    if (relevant > 0) {
+      const share = isDeployment ? setupMinutes / relevant : maintMinutes / relevant;
+      if (share < ROLE_MOSTLY_THRESHOLD) {
+        reasons.push(`${isDeployment ? 'Deployment' : 'Ongoing Delivery'} role but only ${(share * 100).toFixed(0)}% on the expected phase`);
+      }
+    }
+  }
+
+  const isManagerOrLead = roleName.includes('manager') || roleName.includes('lead');
+  if (!isManagerOrLead) {
+    const adminMinutes = pending.filter(e => e.projectPhase?.phaseName === ADMIN_PHASE).reduce((s, e) => s + e.minutes, 0);
+    if (adminMinutes > ADMIN_FLAG_MINUTES) {
+      reasons.push(`${(adminMinutes / 60).toFixed(1)}h on admin phase, over the 20h flag threshold`);
+    }
+  }
+
+  const reviewEntries = pending.filter(e => REVIEW_PHASES.includes(e.projectPhase?.phaseName));
+  if (reviewEntries.length > 0) {
+    reasons.push(`Time tracked to ${[...new Set(reviewEntries.map(e => e.projectPhase.phaseName))].join(', ')} — always flagged for review`);
+  }
+
+  return { decision: reasons.length === 0 ? 'APPROVE' : 'REJECT', reasons, totalMinutes };
+}
+
+async function main() {
   const today = new Date().toISOString().slice(0, 10);
-  const weekStart = process.env.WEEK_START || mondayOf(addDays(today, -7));
+  const weekStart = mondayOf(today);
   const weekEnd = addDays(weekStart, 6);
-  console.log(`Reviewing week ${weekStart} to ${weekEnd} (dry run: ${DRY_RUN})`);
+  const lookbackStart = addDays(weekStart, -7 * LOOKBACK_WEEKS);
 
-  const users = await getAllPages('/users?status.eq=ACTIVE');
-  const userById = new Map(users.map((u) => [u.userId, u]));
+  const users = (await getAllPages('/users?status.eq=ACTIVE')).filter(u => u.status === 'ACTIVE');
+  const usersById = new Map(users.map(u => [u.userId, u]));
 
-  const weekEntries = await getAllPages(
-    `/time-entries?date.ge=${weekStart}&date.le=${weekEnd}&includeFields=status,submittedBy,submittedAt,approvedBy,approvedAt`
+  const includeFields = 'status,submittedBy,submittedAt,approvedBy,approvedAt,rejectedBy,rejectedAt';
+  const entries = await getAllPages(
+    `/time-entries?date.gte=${lookbackStart}&date.lte=${weekEnd}&includeFields=${includeFields}`
   );
 
-  const byUser = new Map();
-  for (const e of weekEntries) {
-    if (e.status === 'REJECTED') continue;
-    const uid = e.user.userId;
-    if (!byUser.has(uid)) byUser.set(uid, []);
-    byUser.get(uid).push(e);
+  // byUserWeek: userId -> weekStart -> entries[]
+  const byUserWeek = new Map();
+  for (const e of entries) {
+    if (e.status === 'REJECTED' && false) continue; // rejections are kept, handled explicitly below
+    const wk = mondayOf(e.date);
+    const uid = e.user?.userId;
+    if (!uid) continue;
+    if (!byUserWeek.has(uid)) byUserWeek.set(uid, new Map());
+    const userWeeks = byUserWeek.get(uid);
+    if (!userWeeks.has(wk)) userWeeks.set(wk, []);
+    userWeeks.get(wk).push(e);
   }
 
-  const results = [];
+  const weeksInWindow = [];
+  for (let i = 0; i < LOOKBACK_WEEKS + 1; i++) {
+    weeksInWindow.push(addDays(weekStart, -7 * i));
+  }
+  weeksInWindow.reverse(); // oldest first, current week last
 
-  for (const [userId, weekEntriesForUser] of byUser) {
-    const pending = weekEntriesForUser.filter((e) => e.status === 'SUBMITTED');
-    if (pending.length === 0) continue; // nothing awaiting approval for this person
+  const perUserSummary = [];
+  const approveActions = [];
 
-    const counted = weekEntriesForUser.filter((e) => e.status === 'SUBMITTED' || e.status === 'APPROVED');
-    const user = userById.get(userId);
-    const roleName = (user?.role?.roleName || '').toLowerCase();
-    const reasons = [];
+  for (const user of users) {
+    const userWeeks = byUserWeek.get(user.userId) || new Map();
+    const hireMonday = user.createdAt ? mondayOf(user.createdAt.slice(0, 10)) : null;
+    const weekFlags = [];
+    let missingCount = 0;
+    let unresolvedRejectionCount = 0;
 
-    const totalMinutes = counted.reduce((sum, e) => sum + e.minutes, 0);
-    if (totalMinutes < MIN_WEEKLY_MINUTES) {
-      reasons.push(`Only ${(totalMinutes / 60).toFixed(1)}h submitted/approved this week, below the 40h minimum`);
-    }
-    if (totalMinutes > MAX_WEEKLY_MINUTES) {
-      reasons.push(`${(totalMinutes / 60).toFixed(1)}h submitted/approved this week, over the 65h flag threshold`);
-    }
+    for (const wk of weeksInWindow) {
+      if (hireMonday && wk < hireMonday) continue; // week before they joined
 
-    const nonTimeTracking = pending.filter(
-      (e) => !(e.project && e.project.projectName.toLowerCase().includes('time tracking'))
-    );
-    if (nonTimeTracking.length) {
-      reasons.push(`${nonTimeTracking.length} pending entries not on a "Time Tracking" project (e.g. "${nonTimeTracking[0].project?.projectName}")`);
-    }
+      const weekEntries = userWeeks.get(wk) || [];
+      const pending = weekEntries.filter(e => e.status === 'SUBMITTED');
+      const counted = weekEntries.filter(e => e.status === 'SUBMITTED' || e.status === 'APPROVED');
+      const rejected = weekEntries.filter(e => e.status === 'REJECTED');
 
-    const missingPhase = pending.filter((e) => !e.projectPhase);
-    if (missingPhase.length) {
-      reasons.push(`${missingPhase.length} pending entries with no work/phase selected`);
-    }
+      let category;
+      let evalResult = null;
 
-    if (user) {
-      const tenureMonths = monthsBetween(user.createdAt, Date.now());
-      if (tenureMonths > ONBOARDING_TENURE_MONTHS) {
-        const onOnboarding = pending.filter((e) => e.projectPhase && e.projectPhase.phaseName === ONBOARDING_PHASE);
-        if (onOnboarding.length) {
-          reasons.push(`${onOnboarding.length} pending entries on "onboarding" despite ${tenureMonths}mo tenure (>3mo limit)`);
-        }
+      if (weekEntries.length === 0) {
+        category = 'MISSING';
+        missingCount++;
+      } else if (pending.length === 0 && rejected.length > 0) {
+        category = 'REJECTED_NOT_RESUBMITTED';
+        unresolvedRejectionCount++;
+      } else if (pending.length === 0) {
+        const draftMinutes = weekEntries.reduce((s, e) => s + (e.minutes || 0), 0);
+        category = draftMinutes < MIN_WEEKLY_MINUTES ? 'INCOMPLETE_NOT_SUBMITTED' : 'clean';
+      } else {
+        evalResult = evaluateWeek(pending, counted, user);
+        category = evalResult.decision === 'APPROVE' ? 'clean' : 'OUTSTANDING';
       }
-    } else {
-      reasons.push('User not found in active roster');
-    }
 
-    const vacationEntries = pending.filter((e) => e.projectPhase && e.projectPhase.phaseName === VACATION_PHASE);
-    const badVacation = vacationEntries.filter((e) => e.minutes !== 480 && e.minutes !== 240);
-    if (badVacation.length) {
-      reasons.push(`${badVacation.length} pending vacation entries not exactly 8h or 4h (e.g. ${(badVacation[0].minutes / 60).toFixed(1)}h)`);
-    }
+      if (category !== 'clean') {
+        weekFlags.push({ week: wk, category, reasons: evalResult?.reasons || [] });
+      }
 
-    if (roleName) {
-      const setupMinutes = counted.filter((e) => e.projectPhase?.phaseName === SETUP_PHASE).reduce((s, e) => s + e.minutes, 0);
-      const maintenanceMinutes = counted.filter((e) => e.projectPhase?.phaseName === MAINTENANCE_PHASE).reduce((s, e) => s + e.minutes, 0);
-      const relevantTotal = setupMinutes + maintenanceMinutes;
-      if (relevantTotal > 0) {
-        if (roleName.includes('deployment') && !roleName.includes('ongoing delivery')) {
-          const setupShare = setupMinutes / relevantTotal;
-          if (setupShare < ROLE_MOSTLY_THRESHOLD) {
-            reasons.push(`Deployment role but only ${(setupShare * 100).toFixed(0)}% of this week's setup/maintenance hours are setup`);
-          }
-        } else if (roleName.includes('ongoing delivery')) {
-          const maintenanceShare = maintenanceMinutes / relevantTotal;
-          if (maintenanceShare < ROLE_MOSTLY_THRESHOLD) {
-            reasons.push(`Ongoing Delivery role but only ${(maintenanceShare * 100).toFixed(0)}% of this week's setup/maintenance hours are maintenance`);
-          }
-        }
+      if (wk === weekStart && category === 'clean' && pending.length > 0) {
+        approveActions.push({ userId: user.userId, date: weekStart });
       }
     }
 
-    const adminMinutes = pending.filter((e) => e.projectPhase?.phaseName === ADMIN_PHASE).reduce((s, e) => s + e.minutes, 0);
-    if (adminMinutes > ADMIN_FLAG_MINUTES && !roleName.includes('manager') && !roleName.includes('lead')) {
-      reasons.push(`${(adminMinutes / 60).toFixed(1)}h logged to admin, over the 20h flag threshold for a non-manager/lead role`);
-    }
+    const escalate = missingCount >= ESCALATE_AFTER || unresolvedRejectionCount >= ESCALATE_AFTER;
 
-    const reviewPhaseEntries = pending.filter((e) => e.projectPhase && REVIEW_PHASES.includes(e.projectPhase.phaseName));
-    if (reviewPhaseEntries.length) {
-      const phasesUsed = [...new Set(reviewPhaseEntries.map((e) => e.projectPhase.phaseName))].join(', ');
-      reasons.push(`${reviewPhaseEntries.length} entries on a flagged phase (${phasesUsed}) — needs manual review`);
-    }
-
-    const decision = reasons.length === 0 ? 'APPROVE' : 'NEEDS_REVIEW';
-    results.push({
-      userId,
-      email: user?.email,
-      name: user ? `${user.firstName} ${user.lastName || ''}`.trim() : null,
-      pendingHours: (pending.reduce((s, e) => s + e.minutes, 0) / 60).toFixed(1),
-      weekTotalHours: (totalMinutes / 60).toFixed(1),
-      decision,
-      reasons,
-    });
-  }
-
-  console.log(JSON.stringify(results, null, 2));
-
-  for (const r of results) {
-    if (r.decision === 'APPROVE') {
-      console.log(`Approving ${r.email} for week ${weekStart}...`);
-      await patch(`/users/${r.userId}/approve-timesheet`, { date: weekStart });
+    if (weekFlags.length > 0 || escalate) {
+      perUserSummary.push({
+        userId: user.userId,
+        name: user.userName || user.email,
+        missingCount,
+        unresolvedRejectionCount,
+        escalate,
+        weekFlags,
+      });
     }
   }
 
-  const approved = results.filter((r) => r.decision === 'APPROVE').length;
-  const needsReview = results.filter((r) => r.decision === 'NEEDS_REVIEW').length;
-  console.log(`\nDone. ${approved} approved, ${needsReview} need human review.`);
-})().catch((err) => {
-  console.error('Review run failed:', err.message);
+  console.log('=== Lookback report ===');
+  console.log(JSON.stringify({ weekStart, lookbackStart, weeksChecked: weeksInWindow.length, perUserSummary }, null, 2));
+
+  console.log(`=== Current week approvals (${approveActions.length}) ===`);
+  for (const action of approveActions) {
+    await patch(`/users/${action.userId}/approve-timesheet`, { date: action.date });
+  }
+}
+
+main().catch(err => {
+  console.error('Discovery run failed:', err.message);
   process.exit(1);
 });

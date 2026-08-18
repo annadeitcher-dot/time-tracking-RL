@@ -22,12 +22,31 @@ function show(title, data, max = 6000) {
 
 (async () => {
   const fields = await get('/fields');
-  const objectTypes = [...new Set((fields.data || []).map((f) => f.objectType))];
-  show('Object types seen in /fields', objectTypes);
-  show('Time entry fields', (fields.data || []).filter((f) => f.objectType === 'TIME_ENTRY'));
+  const byType = {};
+  for (const f of fields.data || []) (byType[f.objectType] ||= []).push(f);
+  show('Object types seen in /fields', Object.keys(byType));
+  show('USER fields', byType['USER'] || []);
 
-  show('Time entries (sample)', await get('/time-entries'));
-  show('Projects (sample)', await get('/projects'));
+  const timeEntries = (await get('/time-entries')).data || [];
+  show('Time entries (first 5, raw)', timeEntries.slice(0, 5));
+
+  const projects = (await get('/projects')).data || [];
+  show(
+    'Projects (summarized, first 8)',
+    projects.slice(0, 8).map((p) => ({
+      projectId: p.projectId,
+      projectName: p.projectName,
+      archived: p.archived,
+      projectTypeField: (p.fields || []).find((f) => f.fieldLabel === 'Project Type'),
+    }))
+  );
+
+  try {
+    const users = (await get('/users')).data || [];
+    show('Users (first 5, raw)', users.slice(0, 5));
+  } catch (err) {
+    show('Users endpoint error', { message: err.message });
+  }
 })().catch((err) => {
   console.error('Discovery run failed:', err.message);
   process.exit(1);

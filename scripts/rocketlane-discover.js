@@ -11,8 +11,15 @@ async function get(path) {
 }
 
 (async () => {
-  const categories = await get('/time-entries/categories?pageSize=100');
-  console.log(JSON.stringify(categories, null, 2));
+  const fields = await get('/fields?objectType.eq=TIME_ENTRY&pageSize=100');
+  console.log('=== TIME_ENTRY custom fields ===');
+  console.log(JSON.stringify(fields, null, 2));
+
+  const recent = (
+    await get('/time-entries?includeAllFields=true&pageSize=3&sortBy=date&sortOrder=desc')
+  ).data || [];
+  console.log('\n=== Recent entries, all fields ===');
+  console.log(JSON.stringify(recent, null, 2));
 })().catch((err) => {
   console.error('Discovery run failed:', err.message);
   process.exit(1);

@@ -11,8 +11,8 @@ async function get(path) {
 }
 
 (async () => {
-  const users = (await get('/users?status.eq=ACTIVE&includeFields=role')).data || [];
-  console.log(JSON.stringify(users.slice(0, 10), null, 2));
+  const categories = await get('/time-entries/categories?pageSize=100');
+  console.log(JSON.stringify(categories, null, 2));
 })().catch((err) => {
   console.error('Discovery run failed:', err.message);
   process.exit(1);

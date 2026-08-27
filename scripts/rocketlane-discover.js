@@ -3,6 +3,7 @@ const BASE_URL = 'https://api.rocketlane.com/api/1.0';
 const DRY_RUN = process.env.DRY_RUN !== 'false';
 const LOOKBACK_WEEKS = parseInt(process.env.LOOKBACK_WEEKS || '4', 10);
 const ESCALATE_AFTER = 2;
+const TRAY_WEBHOOK_URL = process.env.TRAY_WEBHOOK_URL;
 
 const MIN_WEEKLY_MINUTES = 40 * 60;
 const MAX_WEEKLY_MINUTES = 65 * 60;
@@ -15,6 +16,7 @@ const REVIEW_PHASES = ['poc', 'portal_migration', 'pilot'];
 const ADMIN_FLAG_MINUTES = 20 * 60;
 const ONBOARDING_TENURE_MONTHS = 3;
 const ROLE_MOSTLY_THRESHOLD = 0.5; // TK: confirm exact threshold
+const TIME_TRACKING_DOC = 'https://docs.google.com/document/d/11zdx8IMfaCseZ4EdfssiQ5hPg4mkasZgTHjXFwEpQAA/edit?tab=t.0#heading=h.e6jlmxweq7jv';
 
 async function get(path) {
   const res = await fetch(`${BASE_URL}${path}`, { headers: { 'api-key': API_KEY } });
@@ -65,6 +67,26 @@ function addDays(dateStr, n) {
 
 function monthsBetween(fromMs, toMs) {
   return (toMs - fromMs) / (1000 * 60 * 60 * 24 * 30.44);
+}
+
+function buildRejectNote(reasons) {
+  const bullets = reasons.map(r => `- ${r}`).join('\n');
+  return `This week's timesheet needs correction before it can be approved:\n${bullets}\n\nPlease fix the flagged entries and resubmit the full week (partial corrections aren't accepted).\nInstructions: ${TIME_TRACKING_DOC}`;
+}
+
+async function postToTray(payload) {
+  if (!TRAY_WEBHOOK_URL) {
+    console.log('[TRAY] TRAY_WEBHOOK_URL not set — skipping Slack delivery, recs are in this log only.');
+    return;
+  }
+  const res = await fetch(TRAY_WEBHOOK_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    console.error(`[TRAY] webhook POST failed: ${res.status} ${await res.text()}`);
+  }
 }
 
 // Runs the shared approve/reject criteria against one person's one week.
@@ -135,7 +157,6 @@ function evaluateWeek(pending, counted, user) {
 
   return { decision: reasons.length === 0 ? 'APPROVE' : 'REJECT', reasons, totalMinutes };
 }
-
 async function main() {
   const today = new Date().toISOString().slice(0, 10);
   const weekStart = mondayOf(today);
@@ -153,7 +174,6 @@ async function main() {
   // byUserWeek: userId -> weekStart -> entries[]
   const byUserWeek = new Map();
   for (const e of entries) {
-    if (e.status === 'REJECTED' && false) continue; // rejections are kept, handled explicitly below
     const wk = mondayOf(e.date);
     const uid = e.user?.userId;
     if (!uid) continue;
@@ -171,6 +191,7 @@ async function main() {
 
   const perUserSummary = [];
   const approveActions = [];
+  const rejectActions = [];
 
   for (const user of users) {
     const userWeeks = byUserWeek.get(user.userId) || new Map();
@@ -209,7 +230,11 @@ async function main() {
       }
 
       if (wk === weekStart && category === 'clean' && pending.length > 0) {
-        approveActions.push({ userId: user.userId, date: weekStart });
+        approveActions.push({ userId: user.userId, date: weekStart, name: user.userName || user.email, email: user.email });
+      }
+
+      if (wk === weekStart && category === 'OUTSTANDING') {
+        rejectActions.push({ userId: user.userId, date: weekStart, name: user.userName || user.email, email: user.email, rejectNote: buildRejectNote(evalResult.reasons), reasons: evalResult.reasons });
       }
     }
 
@@ -219,6 +244,7 @@ async function main() {
       perUserSummary.push({
         userId: user.userId,
         name: user.userName || user.email,
+        email: user.email,
         missingCount,
         unresolvedRejectionCount,
         escalate,
@@ -234,6 +260,22 @@ async function main() {
   for (const action of approveActions) {
     await patch(`/users/${action.userId}/approve-timesheet`, { date: action.date });
   }
+
+  console.log(`=== Current week rejections (${rejectActions.length}) ===`);
+  for (const action of rejectActions) {
+    await patch(`/users/${action.userId}/reject-timesheet`, { date: action.date, rejectNote: action.rejectNote });
+  }
+
+  await postToTray({
+    weekStart,
+    dryRun: DRY_RUN,
+    approved: approveActions.map(a => ({ name: a.name, email: a.email })),
+    rejected: rejectActions.map(a => ({ name: a.name, email: a.email, reasons: a.reasons })),
+    escalations: perUserSummary
+      .filter(u => u.escalate)
+      .map(u => ({ name: u.name, email: u.email, missingCount: u.missingCount, unresolvedRejectionCount: u.unresolvedRejectionCount })),
+    flaggedUserCount: perUserSummary.length,
+  });
 }
 
 main().catch(err => {

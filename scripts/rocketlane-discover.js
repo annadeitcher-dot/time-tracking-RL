@@ -167,8 +167,8 @@ async function main() {
   const usersById = new Map(users.map(u => [u.userId, u]));
 
   const includeFields = 'status,submittedBy,submittedAt,approvedBy,approvedAt,rejectedBy,rejectedAt';
-  const entries = await getAllPages(
-    `/time-entries?date.gte=${lookbackStart}&date.lte=${weekEnd}&includeFields=${includeFields}`
+   const entries = await getAllPages(
+    `/time-entries?date.ge=${lookbackStart}&date.le=${weekEnd}&includeFields=${includeFields}`
   );
 
   // byUserWeek: userId -> weekStart -> entries[]

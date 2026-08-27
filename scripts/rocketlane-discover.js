@@ -18,6 +18,10 @@ const ONBOARDING_TENURE_MONTHS = 3;
 const ROLE_MOSTLY_THRESHOLD = 0.5; // TK: confirm exact threshold
 const TIME_TRACKING_DOC = 'https://docs.google.com/document/d/11zdx8IMfaCseZ4EdfssiQ5hPg4mkasZgTHjXFwEpQAA/edit?tab=t.0#heading=h.e6jlmxweq7jv';
 
+function nameOf(user) {
+  return [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email;
+}
+
 async function get(path) {
   const res = await fetch(`${BASE_URL}${path}`, { headers: { 'api-key': API_KEY } });
   if (!res.ok) throw new Error(`${path} -> ${res.status}: ${await res.text()}`);
@@ -167,7 +171,7 @@ async function main() {
   const usersById = new Map(users.map(u => [u.userId, u]));
 
   const includeFields = 'status,submittedBy,submittedAt,approvedBy,approvedAt,rejectedBy,rejectedAt';
-   const entries = await getAllPages(
+  const entries = await getAllPages(
     `/time-entries?date.ge=${lookbackStart}&date.le=${weekEnd}&includeFields=${includeFields}`
   );
 
@@ -195,7 +199,7 @@ async function main() {
 
   for (const user of users) {
     const userWeeks = byUserWeek.get(user.userId) || new Map();
-    const hireMonday = user.createdAt ? mondayOf(user.createdAt.slice(0, 10)) : null;
+    const hireMonday = user.createdAt ? mondayOf(new Date(user.createdAt).toISOString().slice(0, 10)) : null;
     const weekFlags = [];
     let missingCount = 0;
     let unresolvedRejectionCount = 0;
@@ -230,11 +234,11 @@ async function main() {
       }
 
       if (wk === weekStart && category === 'clean' && pending.length > 0) {
-        approveActions.push({ userId: user.userId, date: weekStart, name: user.userName || user.email, email: user.email });
+        approveActions.push({ userId: user.userId, date: weekStart, name: nameOf(user), email: user.email });
       }
 
       if (wk === weekStart && category === 'OUTSTANDING') {
-        rejectActions.push({ userId: user.userId, date: weekStart, name: user.userName || user.email, email: user.email, rejectNote: buildRejectNote(evalResult.reasons), reasons: evalResult.reasons });
+        rejectActions.push({ userId: user.userId, date: weekStart, name: nameOf(user), email: user.email, rejectNote: buildRejectNote(evalResult.reasons), reasons: evalResult.reasons });
       }
     }
 
@@ -243,7 +247,7 @@ async function main() {
     if (weekFlags.length > 0 || escalate) {
       perUserSummary.push({
         userId: user.userId,
-        name: user.userName || user.email,
+        name: nameOf(user),
         email: user.email,
         missingCount,
         unresolvedRejectionCount,

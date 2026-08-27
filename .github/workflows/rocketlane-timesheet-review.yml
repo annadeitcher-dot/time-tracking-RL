@@ -2,6 +2,8 @@ name: Rocketlane Timesheet Review (discovery)
 
 on:
   workflow_dispatch: {}
+  schedule:
+    - cron: '0 13 * * 2,5'
 
 jobs:
   discover:
@@ -14,4 +16,5 @@ jobs:
       - name: Run Rocketlane API discovery
         env:
           ROCKETLANE_API_KEY: ${{ secrets.ROCKETLANE_API_KEY }}
+          TRAY_WEBHOOK_URL: ${{ secrets.TRAY_WEBHOOK_URL }}
         run: node scripts/rocketlane-discover.js

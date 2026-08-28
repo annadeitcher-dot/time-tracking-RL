@@ -175,11 +175,13 @@ async function main() {
   const weekEnd = addDays(weekStart, 6);
   const lookbackStart = addDays(weekStart, -7 * LOOKBACK_WEEKS);
 
-  const users = (await getAllPages('/users?status.eq=ACTIVE')).filter(u =>
-    u.status === 'ACTIVE' &&
-    (u.email || '').toLowerCase().endsWith('@braze.com') &&
-    INCLUDED_ROLES.includes((u.role?.roleName || '').toLowerCase())
-  );
+   const activeBrazeUsers = (await getAllPages('/users?status.eq=ACTIVE')).filter(
+        u => u.status === 'ACTIVE' && (u.email || '').toLowerCase().endsWith('@braze.com')
+      );
+      console.log('=== Roles seen ===');
+      console.log(JSON.stringify([...new Set(activeBrazeUsers.map(u => u.role?.roleName))], null, 2));
+
+  const users = activeBrazeUsers.filter(u => INCLUDED_ROLES.includes((u.role?.roleName || '').toLowerCase()));
   const usersById = new Map(users.map(u => [u.userId, u]));
 
   const includeFields = 'status,submittedBy,submittedAt,approvedBy,approvedAt,rejectedBy,rejectedAt';

@@ -164,12 +164,14 @@ function evaluateWeek(pending, counted, user) {
 }
 async function main() {
   const today = new Date().toISOString().slice(0, 10);
-  const weekStart = mondayOf(today);
+  const weekStart = addDays(mondayOf(today), -7);
   const weekEnd = addDays(weekStart, 6);
   const lookbackStart = addDays(weekStart, -7 * LOOKBACK_WEEKS);
 
-  const users = (await getAllPages('/users?status.eq=ACTIVE')).filter(
-    u => u.status === 'ACTIVE' && !EXEMPT_ROLES.includes((u.role?.roleName || '').toLowerCase())
+  const users = (await getAllPages('/users?status.eq=ACTIVE')).filter(u =>
+    u.status === 'ACTIVE' &&
+    (u.email || '').toLowerCase().endsWith('@braze.com') &&
+    !EXEMPT_ROLES.includes((u.role?.roleName || '').toLowerCase())
   );
   const usersById = new Map(users.map(u => [u.userId, u]));
 

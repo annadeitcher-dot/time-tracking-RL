@@ -16,15 +16,19 @@ const REVIEW_PHASES = ['poc', 'portal_migration', 'pilot'];
 const ADMIN_FLAG_MINUTES = 20 * 60;
 const ONBOARDING_TENURE_MONTHS = 3;
 const ROLE_MOSTLY_THRESHOLD = 0.5; // TK: confirm exact threshold
-const INCLUDED_ROLES = [
-  'ai deployment field data scientist',
-  'technical lead - ai deployment field data scientist',
-  'ongoing delivery field data scientist',
-  'technical lead - ongoing delivery field data scientist',
-  'data standards and troubleshooting manager',
-  'engagement manager, ai deployment',
-];
 const TIME_TRACKING_DOC = 'https://docs.google.com/document/d/11zdx8IMfaCseZ4EdfssiQ5hPg4mkasZgTHjXFwEpQAA/edit?tab=t.0#heading=h.e6jlmxweq7jv';
+
+const INCLUDED_ROLE_IDS = {
+  97072: 'ai_deployment_fds',
+  105925: 'ai_deployment_fds_lead',
+  104355: 'ongoing_delivery_fds',
+  109786: 'ongoing_delivery_fds_lead',
+  102474: 'data_standards_manager',
+  97069: 'engagement_manager',
+};
+const DEPLOYMENT_CATEGORIES = ['ai_deployment_fds', 'ai_deployment_fds_lead'];
+const ONGOING_DELIVERY_CATEGORIES = ['ongoing_delivery_fds', 'ongoing_delivery_fds_lead'];
+const MANAGER_OR_LEAD_CATEGORIES = ['ai_deployment_fds_lead', 'ongoing_delivery_fds_lead', 'data_standards_manager', 'engagement_manager'];
 
 function nameOf(user) {
   return [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email;
@@ -139,9 +143,8 @@ function evaluateWeek(pending, counted, user) {
     }
   }
 
-  const roleName = (user.role?.roleName || '').toLowerCase();
-  const isDeployment = roleName.includes('deployment');
-  const isOngoingDelivery = roleName.includes('ongoing delivery');
+  const isDeployment = DEPLOYMENT_CATEGORIES.includes(user.roleCategory);
+  const isOngoingDelivery = ONGOING_DELIVERY_CATEGORIES.includes(user.roleCategory);
   if (isDeployment || isOngoingDelivery) {
     const setupMinutes = pending.filter(e => e.projectPhase?.phaseName === SETUP_PHASE).reduce((s, e) => s + e.minutes, 0);
     const maintMinutes = pending.filter(e => e.projectPhase?.phaseName === MAINTENANCE_PHASE).reduce((s, e) => s + e.minutes, 0);
@@ -154,7 +157,7 @@ function evaluateWeek(pending, counted, user) {
     }
   }
 
-  const isManagerOrLead = roleName.includes('manager') || roleName.includes('lead');
+  const isManagerOrLead = MANAGER_OR_LEAD_CATEGORIES.includes(user.roleCategory);
   if (!isManagerOrLead) {
     const adminMinutes = pending.filter(e => e.projectPhase?.phaseName === ADMIN_PHASE).reduce((s, e) => s + e.minutes, 0);
     if (adminMinutes > ADMIN_FLAG_MINUTES) {
@@ -175,14 +178,16 @@ async function main() {
   const weekEnd = addDays(weekStart, 6);
   const lookbackStart = addDays(weekStart, -7 * LOOKBACK_WEEKS);
 
-   const activeBrazeUsers = (await getAllPages('/users?status.eq=ACTIVE')).filter(
-        u => u.status === 'ACTIVE' && (u.email || '').toLowerCase().endsWith('@braze.com')
-      );
-      console.log('=== Roles seen ===');
-      console.log(JSON.stringify([...new Set(activeBrazeUsers.map(u => u.role?.roleName))], null, 2));
-
-  const users = activeBrazeUsers.filter(u => INCLUDED_ROLES.includes((u.role?.roleName || '').toLowerCase()));
-  const usersById = new Map(users.map(u => [u.userId, u]));
+  const usersByRole = await Promise.all(
+    Object.entries(INCLUDED_ROLE_IDS).map(([roleId, category]) =>
+      getAllPages(`/users?status.eq=ACTIVE&roleId.eq=${roleId}`).then(list =>
+        list
+          .filter(u => (u.email || '').toLowerCase().endsWith('@braze.com'))
+          .map(u => ({ ...u, roleCategory: category }))
+      )
+    )
+  );
+  const users = usersByRole.flat();
 
   const includeFields = 'status,submittedBy,submittedAt,approvedBy,approvedAt,rejectedBy,rejectedAt';
   const entries = await getAllPages(

@@ -16,7 +16,14 @@ const REVIEW_PHASES = ['poc', 'portal_migration', 'pilot'];
 const ADMIN_FLAG_MINUTES = 20 * 60;
 const ONBOARDING_TENURE_MONTHS = 3;
 const ROLE_MOSTLY_THRESHOLD = 0.5; // TK: confirm exact threshold
-const EXEMPT_ROLES = ['ai success manager', 'revops', 'ai deployment leadership', 'product manager', 'solution architect'];
+const INCLUDED_ROLES = [
+  'ai deployment field data scientist',
+  'technical lead - ai deployment field data scientist',
+  'ongoing delivery field data scientist',
+  'technical lead - ongoing delivery field data scientist',
+  'data standards and troubleshooting manager',
+  'engagement manager, ai deployment',
+];
 const TIME_TRACKING_DOC = 'https://docs.google.com/document/d/11zdx8IMfaCseZ4EdfssiQ5hPg4mkasZgTHjXFwEpQAA/edit?tab=t.0#heading=h.e6jlmxweq7jv';
 
 function nameOf(user) {
@@ -171,7 +178,7 @@ async function main() {
   const users = (await getAllPages('/users?status.eq=ACTIVE')).filter(u =>
     u.status === 'ACTIVE' &&
     (u.email || '').toLowerCase().endsWith('@braze.com') &&
-    !EXEMPT_ROLES.includes((u.role?.roleName || '').toLowerCase())
+    INCLUDED_ROLES.includes((u.role?.roleName || '').toLowerCase())
   );
   const usersById = new Map(users.map(u => [u.userId, u]));
 

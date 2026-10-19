@@ -12,7 +12,7 @@ Automated first-pass review of weekly timesheets for AI Deployment and Ongoing D
 
 ### How it runs
 
-- **Trigger:** GitHub Actions, `.github/workflows/rocketlane-timesheet-review.yml` — cron `Tue/Fri 13:00 UTC` (normal review run), `Wed 13:00 UTC` (manager escalation follow-up, one day after Tuesday's run only — deliberately not scheduled after Friday's run, to avoid pinging managers over the weekend), or manual `workflow_dispatch`.
+- **Trigger:** GitHub Actions, `.github/workflows/rocketlane-timesheet-review.yml` — cron `Tue/Fri 13:00 UTC` (normal review run), `Mon/Wed 13:00 UTC` (manager escalation follow-up — 1 day after Tuesday's run, or 3 days after Friday's, skipping the weekend so managers are never pinged on Sat/Sun), or manual `workflow_dispatch`.
 - **Script:** `scripts/rocketlane-discover.js`
 - **Secrets required:** `ROCKETLANE_API_KEY`, `TRAY_WEBHOOK_URL`
 
@@ -32,7 +32,7 @@ Automated first-pass review of weekly timesheets for AI Deployment and Ongoing D
 5. Users with ≥2 missing weeks or ≥2 unresolved rejections in the lookback window are flagged for escalation (`ESCALATE_AFTER`).
 6. Approve/reject actions (real or dry-run) are sent to Rocketlane via PATCH.
 7. A summary — approvals, rejections with reasons, escalations, tagged `kind: "weekly_review"` — is POSTed to the Tray webhook, which relays it to the ops Slack channel.
-8. The following Wednesday (one day after the Tuesday run only — not after Friday's, to avoid a weekend ping), the same script runs again with `MANAGER_FOLLOWUP_ONLY=true`: it skips the Rocketlane PATCH calls, re-derives that week's escalation list read-only, and — only if there's at least one outstanding escalation — POSTs a separate `kind: "manager_escalation"` payload to the same Tray webhook, which Tray routes to the managers Slack channel instead of the ops channel. Escalations flagged on the Friday run do not currently get this follow-up ping.
+8. One business day later (Wednesday after Tuesday's run, or Monday after Friday's — never a weekend), the same script runs again with `MANAGER_FOLLOWUP_ONLY=true`. It re-anchors to the correct preceding review date (`followupAnchorDate()` — necessary because Fri→Mon crosses an ISO week boundary, so "today" alone can't be used the way the primary run uses it), skips the Rocketlane PATCH calls, re-derives that same week's escalation list read-only, and — only if there's at least one outstanding escalation — POSTs a separate `kind: "manager_escalation"` payload to the same Tray webhook, which Tray routes to the managers Slack channel instead of the ops channel. People stay on this list (and keep getting flagged) across every run until they submit.
 
 ### Data
 

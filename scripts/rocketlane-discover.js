@@ -194,9 +194,22 @@ function evaluateWeek(pending, counted, user) {
 
   return { decision: reasons.length === 0 ? 'APPROVE' : 'REJECT', reasons, totalMinutes };
 }
+// The manager follow-up runs 1 day after Tuesday's review (Wednesday) or
+// 3 days after Friday's review (the following Monday, skipping the weekend).
+// Either way it must re-derive the SAME weekStart the preceding primary run
+// used — Mon and Fri fall in different ISO weeks, so "today" can't be used
+// directly the way the primary run uses it.
+function followupAnchorDate(todayStr) {
+  const dow = new Date(todayStr + 'T00:00:00Z').getUTCDay(); // 0=Sun..6=Sat
+  if (dow === 1) return addDays(todayStr, -3); // Monday -> back to Friday
+  if (dow === 3) return addDays(todayStr, -1); // Wednesday -> back to Tuesday
+  return addDays(todayStr, -1); // fallback for an ad-hoc manual run
+}
+
 async function main() {
   const today = new Date().toISOString().slice(0, 10);
-  const weekStart = addDays(mondayOf(today), -7);
+  const anchorDate = MANAGER_FOLLOWUP_ONLY ? followupAnchorDate(today) : today;
+  const weekStart = addDays(mondayOf(anchorDate), -7);
   const weekEnd = addDays(weekStart, 6);
   const lookbackStart = addDays(weekStart, -7 * LOOKBACK_WEEKS);
 

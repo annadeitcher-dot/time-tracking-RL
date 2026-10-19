@@ -1,9 +1,14 @@
+const fs = require('fs');
+const path = require('path');
+
 const API_KEY = process.env.ROCKETLANE_API_KEY;
 const BASE_URL = 'https://api.rocketlane.com/api/1.0';
 const DRY_RUN = process.env.DRY_RUN !== 'false';
 const LOOKBACK_WEEKS = parseInt(process.env.LOOKBACK_WEEKS || '4', 10);
 const ESCALATE_AFTER = 2;
 const TRAY_WEBHOOK_URL = process.env.TRAY_WEBHOOK_URL;
+const MANAGER_FOLLOWUP_ONLY = process.env.MANAGER_FOLLOWUP_ONLY === 'true';
+const MANAGERS_CSV_PATH = path.join(__dirname, '..', 'data', 'managers.csv');
 
 const MIN_WEEKLY_MINUTES = 40 * 60;
 const MAX_WEEKLY_MINUTES = 65 * 60;
@@ -29,6 +34,23 @@ const INCLUDED_ROLE_IDS = {
 const DEPLOYMENT_CATEGORIES = ['ai_deployment_fds', 'ai_deployment_fds_lead'];
 const ONGOING_DELIVERY_CATEGORIES = ['ongoing_delivery_fds', 'ongoing_delivery_fds_lead'];
 const MANAGER_OR_LEAD_CATEGORIES = ['ai_deployment_fds_lead', 'ongoing_delivery_fds_lead', 'data_standards_manager', 'engagement_manager'];
+
+function loadManagerMap() {
+  const map = new Map();
+  let raw;
+  try {
+    raw = fs.readFileSync(MANAGERS_CSV_PATH, 'utf8');
+  } catch (err) {
+    console.warn(`[managers.csv] could not read ${MANAGERS_CSV_PATH}: ${err.message}`);
+    return map;
+  }
+  const lines = raw.trim().split('\n');
+  for (const line of lines.slice(1)) {
+    const [, email, managerName] = line.split(',');
+    if (email) map.set(email.trim().toLowerCase(), (managerName || '').trim());
+  }
+  return map;
+}
 
 function nameOf(user) {
   return [user.firstName, user.lastName].filter(Boolean).join(' ') || user.email;
@@ -279,6 +301,27 @@ async function main() {
   console.log('=== Lookback report ===');
   console.log(JSON.stringify({ weekStart, lookbackStart, weeksChecked: weeksInWindow.length, perUserSummary }, null, 2));
 
+  const managerByEmail = loadManagerMap();
+  const escalations = perUserSummary
+    .filter(u => u.escalate)
+    .map(u => ({
+      name: u.name,
+      email: u.email,
+      missingCount: u.missingCount,
+      unresolvedRejectionCount: u.unresolvedRejectionCount,
+      managerName: managerByEmail.get((u.email || '').toLowerCase()) || null,
+    }));
+
+  if (MANAGER_FOLLOWUP_ONLY) {
+    console.log(`=== Manager follow-up (${escalations.length} escalations) ===`);
+    if (escalations.length === 0) {
+      console.log('No escalations outstanding — skipping manager notification.');
+      return;
+    }
+    await postToTray({ kind: 'manager_escalation', weekStart, dryRun: DRY_RUN, escalations });
+    return;
+  }
+
   console.log(`=== Current week approvals (${approveActions.length}) ===`);
   for (const action of approveActions) {
     await patch(`/users/${action.userId}/approve-timesheet`, { date: action.date });
@@ -290,13 +333,12 @@ async function main() {
   }
 
   await postToTray({
+    kind: 'weekly_review',
     weekStart,
     dryRun: DRY_RUN,
     approved: approveActions.map(a => ({ name: a.name, email: a.email })),
     rejected: rejectActions.map(a => ({ name: a.name, email: a.email, reasons: a.reasons })),
-    escalations: perUserSummary
-      .filter(u => u.escalate)
-      .map(u => ({ name: u.name, email: u.email, missingCount: u.missingCount, unresolvedRejectionCount: u.unresolvedRejectionCount })),
+    escalations,
     flaggedUserCount: perUserSummary.length,
   });
 }

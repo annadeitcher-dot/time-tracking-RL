@@ -331,7 +331,18 @@ async function main() {
       console.log('No escalations outstanding — skipping manager notification.');
       return;
     }
-    await postToTray({ kind: 'manager_escalation', weekStart, dryRun: DRY_RUN, escalations });
+    // Tray's script-2 step unconditionally dereferences $.steps.trigger.body.approved /
+    // .rejected / .flaggedUserCount via jsonpath, which errors (not just undefined) if the
+    // field is entirely absent — so every payload shape must include all of them.
+    await postToTray({
+      kind: 'manager_escalation',
+      weekStart,
+      dryRun: DRY_RUN,
+      approved: [],
+      rejected: [],
+      escalations,
+      flaggedUserCount: escalations.length,
+    });
     return;
   }
 

@@ -10,6 +10,12 @@ const TRAY_WEBHOOK_URL = process.env.TRAY_WEBHOOK_URL;
 const MANAGER_FOLLOWUP_ONLY = process.env.MANAGER_FOLLOWUP_ONLY === 'true';
 const MANAGERS_CSV_PATH = path.join(__dirname, '..', 'data', 'managers.csv');
 
+// Stopgap for people off the team whose Rocketlane record may still show ACTIVE.
+// Remove an entry here once that person is actually deactivated in Rocketlane.
+const EXCLUDED_EMAILS = new Set([
+  'benjamin.johns@braze.com', // off the team
+]);
+
 const MIN_WEEKLY_MINUTES = 40 * 60;
 const MAX_WEEKLY_MINUTES = 65 * 60;
 const VACATION_PHASE = 'vacation_and_holidays';
@@ -222,7 +228,7 @@ async function main() {
       )
     )
   );
-  const users = usersByRole.flat();
+  const users = usersByRole.flat().filter(u => !EXCLUDED_EMAILS.has((u.email || '').toLowerCase()));
 
   const includeFields = 'status,submittedBy,submittedAt,approvedBy,approvedAt,rejectedBy,rejectedAt';
   const entries = await getAllPages(
